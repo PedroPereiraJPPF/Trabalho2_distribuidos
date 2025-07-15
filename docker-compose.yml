@@ -1,0 +1,14 @@
+services:
+  rabbitmq:
+    image: "rabbitmq:3.13-management"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  mosquitto:
+    image: "eclipse-mosquitto"
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
