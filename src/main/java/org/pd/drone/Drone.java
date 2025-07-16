@@ -19,6 +19,8 @@ public class Drone {
     private final String formato;
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+    private boolean simulandoFalha = false;
+    private final ScheduledExecutorService falhaExecutor = Executors.newSingleThreadScheduledExecutor();
 
     public Drone(String regiao) {
         this.regiao = regiao;
@@ -72,8 +74,7 @@ public class Drone {
                 String.format("%.2f", pressao),
                 String.format("%.2f", radiacao),
                 String.format("%.2f", temperatura),
-                String.format("%.2f", umidade)
-        );
+                String.format("%.2f", umidade));
     }
 
     public void iniciarEnvioDeDados() {
@@ -82,8 +83,16 @@ public class Drone {
             return;
         }
 
+        iniciarSimulacaoFalhas();
+
         Runnable envioTask = () -> {
             try {
+                if (simulandoFalha) {
+                    System.out.println(
+                            "⚠️  Drone [" + this.regiao + "] - Falha de comunicação simulada. Dados não enviados.");
+                    return;
+                }
+
                 String dados = gerarDadosClimaticos();
                 MqttMessage mensagem = new MqttMessage(dados.getBytes());
                 mensagem.setQos(0);
@@ -104,9 +113,29 @@ public class Drone {
         executor.scheduleAtFixedRate(envioTask, 0, intervalo, TimeUnit.MILLISECONDS);
     }
 
+    private void iniciarSimulacaoFalhas() {
+        Runnable falhaTask = () -> {
+            if (!simulandoFalha && random.nextDouble() < 0.3) {
+                simulandoFalha = true;
+                int duracaoFalha = 3000 + random.nextInt(7000);
+                System.out.println("🔴 Drone [" + regiao + "] - Iniciando simulação de falha por "
+                        + (duracaoFalha / 1000) + " segundos");
+
+                falhaExecutor.schedule(() -> {
+                    simulandoFalha = false;
+                    System.out.println("🟢 Drone [" + regiao + "] - Recuperado da falha de comunicação");
+                }, duracaoFalha, TimeUnit.MILLISECONDS);
+            }
+        };
+
+        int intervaloFalha = 15000 + random.nextInt(15000);
+        falhaExecutor.scheduleAtFixedRate(falhaTask, intervaloFalha, intervaloFalha, TimeUnit.MILLISECONDS);
+    }
+
     public void parar() throws MqttException {
         System.out.println("Finalizando drone [" + regiao + "]...");
         executor.shutdown();
+        falhaExecutor.shutdown();
         if (clienteMqtt.isConnected()) {
             clienteMqtt.disconnect();
         }
@@ -137,12 +166,26 @@ public class Drone {
         droneLeste.iniciarEnvioDeDados();
         droneOeste.iniciarEnvioDeDados();
 
+        ScheduledExecutorService notificationExecutor = Executors.newSingleThreadScheduledExecutor();
+        notificationExecutor.schedule(() -> {
+            System.out.println("\n" + "=".repeat(60));
+            System.out.println("⏰ 10 segundos decorridos - HORA DE INICIAR OS CONSUMIDORES!");
+            System.out.println("Execute em terminais separados:");
+            System.out.println("1. java -cp target/Trabalho2Distribuidos-1.0-SNAPSHOT.jar org.pd.gateway.Gateway");
+            System.out.println(
+                    "2. java -cp target/Trabalho2Distribuidos-1.0-SNAPSHOT.jar org.pd.consumidores.ConsumidorBase");
+            System.out.println(
+                    "3. java -cp target/Trabalho2Distribuidos-1.0-SNAPSHOT.jar org.pd.consumidores.ConsumidorTempoReal");
+            System.out.println("=".repeat(60) + "\n");
+        }, 10, TimeUnit.SECONDS);
+
         try {
             System.out.println("\nSimulação rodando por 3 minutos. Pressione CTRL+C para parar antes.");
             Thread.sleep(180000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
+            notificationExecutor.shutdown();
             try {
                 droneNorte.parar();
                 droneSul.parar();

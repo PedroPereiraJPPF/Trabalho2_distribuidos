@@ -6,10 +6,6 @@ import com.rabbitmq.client.ConnectionFactory;
 import org.eclipse.paho.client.mqttv3.*;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 
 public class Gateway {
@@ -22,13 +18,9 @@ public class Gateway {
     private Channel rabbitChannel;
     private static final String RABBIT_EXCHANGE_NAME = "gateway_dados_topic";
 
-    private final Map<String, List<DadosClimaticos>> dadosArmazenados = new ConcurrentHashMap<>();
+    private int totalMensagensProcessadas = 0;
 
     public Gateway() {
-        dadosArmazenados.put("norte", new ArrayList<>());
-        dadosArmazenados.put("sul", new ArrayList<>());
-        dadosArmazenados.put("leste", new ArrayList<>());
-        dadosArmazenados.put("oeste", new ArrayList<>());
     }
 
     public void iniciar() {
@@ -44,7 +36,6 @@ public class Gateway {
             this.rabbitConnection = factory.newConnection();
             this.rabbitChannel = this.rabbitConnection.createChannel();
 
-            // Declara a exchange do tipo "topic" para roteamento flexível
             this.rabbitChannel.exchangeDeclare(RABBIT_EXCHANGE_NAME, "topic");
             System.out.println("Gateway conectado ao RabbitMQ e exchange '" + RABBIT_EXCHANGE_NAME + "' declarada.");
         } catch (IOException | TimeoutException e) {
@@ -71,15 +62,26 @@ public class Gateway {
                     String payload = new String(mensagem.getPayload());
                     String regiao = topico.split("/")[1];
 
-                    System.out.println("Gateway recebeu de [" + regiao + "]: " + payload);
+                    System.out.println("📡 Gateway recebeu de [" + regiao + "]: " + payload);
                     DadosClimaticos dados = processarPayload(regiao, payload);
 
                     if (dados != null) {
-                        armazenarDados(dados);
-                        System.out.println(" -> Dados Processados: " + dados.toString());
+                        totalMensagensProcessadas++;
+                        System.out.println(
+                                "   ✅ Dados Processados (#" + totalMensagensProcessadas + "): " + dados.toString());
 
-                        publicarViaMqtt(dados);
-                        publicarViaRabbitMQ(dados);
+                        boolean mqttOk = publicarViaMqtt(dados);
+                        boolean rabbitOk = publicarViaRabbitMQ(dados);
+
+                        if (mqttOk && rabbitOk) {
+                            System.out.println("   🟢 Dados publicados com sucesso em ambos os protocolos");
+                        } else if (!mqttOk && !rabbitOk) {
+                            System.err.println("   🔴 Falha ao publicar em ambos os protocolos");
+                        } else {
+                            System.out.println("   🟡 Publicação parcial - verificar logs acima");
+                        }
+                    } else {
+                        System.err.println("   ❌ Falha no processamento dos dados de [" + regiao + "]");
                     }
                 }
 
@@ -116,10 +118,10 @@ public class Gateway {
         }
     }
 
-    public void publicarViaMqtt(DadosClimaticos dados) {
+    public boolean publicarViaMqtt(DadosClimaticos dados) {
         if (clienteMqttSaida == null || !clienteMqttSaida.isConnected()) {
             System.err.println("Gateway (saída) não está conectado, impossível publicar.");
-            return;
+            return false;
         }
 
         try {
@@ -130,69 +132,81 @@ public class Gateway {
             mensagem.setQos(0);
 
             clienteMqttSaida.publish(topicoSaida, mensagem);
-            System.out.println("   >> Publicado em [MQTT]: " + topicoSaida + " -> " + payloadSaida);
+            System.out.println("   >> 📤 Publicado em [MQTT]: " + topicoSaida + " -> " + payloadSaida);
+            return true;
 
         } catch (MqttException e) {
             System.err.println("Erro ao publicar via MQTT: " + e.getMessage());
+            return false;
         }
     }
 
     private DadosClimaticos processarPayload(String regiao, String payload) {
         String[] valores;
         switch (regiao.toLowerCase()) {
-            case "norte": valores = payload.split("-"); break;
-            case "sul": valores = payload.replace("(", "").replace(")", "").split("; "); break;
-            case "leste": valores = payload.replace("{", "").replace("}", "").split(", "); break;
-            case "oeste": valores = payload.split("#"); break;
-            default: System.err.println("Região desconhecida: " + regiao); return null;
+            case "norte":
+                valores = payload.split("-");
+                break;
+            case "sul":
+                valores = payload.replace("(", "").replace(")", "").split("; ");
+                break;
+            case "leste":
+                valores = payload.replace("{", "").replace("}", "").split(", ");
+                break;
+            case "oeste":
+                valores = payload.split("#");
+                break;
+            default:
+                System.err.println("Região desconhecida: " + regiao);
+                return null;
         }
         try {
-            double pressao = Double.parseDouble(valores[0].replace(",","."));
-            double radiacao = Double.parseDouble(valores[1].replace(",","."));
-            double temperatura = Double.parseDouble(valores[2].replace(",","."));
-            double umidade = Double.parseDouble(valores[3].replace(",","."));
+            double pressao = Double.parseDouble(valores[0].replace(",", "."));
+            double radiacao = Double.parseDouble(valores[1].replace(",", "."));
+            double temperatura = Double.parseDouble(valores[2].replace(",", "."));
+            double umidade = Double.parseDouble(valores[3].replace(",", "."));
             return new DadosClimaticos(regiao, pressao, radiacao, temperatura, umidade);
         } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-            System.err.println("Erro ao fazer parsing: " + payload); return null;
+            System.err.println("Erro ao fazer parsing: " + payload);
+            return null;
         }
     }
 
-    public void publicarViaRabbitMQ(DadosClimaticos dados) {
+    public boolean publicarViaRabbitMQ(DadosClimaticos dados) {
         if (rabbitChannel == null || !rabbitChannel.isOpen()) {
             System.err.println("Gateway (RabbitMQ) não está conectado, impossível publicar.");
-            return;
+            return false;
         }
         try {
-            String routingKey = dados.getRegiao(); // A região será a chave de roteamento
+            String routingKey = dados.getRegiao();
             String mensagemJson = dados.toJson();
 
             rabbitChannel.basicPublish(
-                    RABBIT_EXCHANGE_NAME, // Nome da exchange
-                    routingKey,           // Chave de roteamento
+                    RABBIT_EXCHANGE_NAME,
+                    routingKey,
                     null,
-                    mensagemJson.getBytes("UTF-8")
-            );
+                    mensagemJson.getBytes("UTF-8"));
 
-            System.out.println("   >> Publicado em [RabbitMQ]: " + routingKey + " -> " + mensagemJson);
+            System.out.println("   >> 🐰 Publicado em [RabbitMQ]: " + routingKey + " -> " + mensagemJson);
+            return true;
 
         } catch (IOException e) {
             System.err.println("Erro ao publicar via RabbitMQ: " + e.getMessage());
-        }
-    }
-
-    private void armazenarDados(DadosClimaticos dados) {
-        synchronized (dadosArmazenados.get(dados.getRegiao())) {
-            dadosArmazenados.get(dados.getRegiao()).add(dados);
+            return false;
         }
     }
 
     public void parar() {
         try {
             System.out.println("Encerrando Gateway...");
-            if (clienteMqttEntrada != null && clienteMqttEntrada.isConnected()) clienteMqttEntrada.disconnect();
-            if (clienteMqttSaida != null && clienteMqttSaida.isConnected()) clienteMqttSaida.disconnect();
-            if (rabbitChannel != null && rabbitChannel.isOpen()) rabbitChannel.close();
-            if (rabbitConnection != null && rabbitConnection.isOpen()) rabbitConnection.close();
+            if (clienteMqttEntrada != null && clienteMqttEntrada.isConnected())
+                clienteMqttEntrada.disconnect();
+            if (clienteMqttSaida != null && clienteMqttSaida.isConnected())
+                clienteMqttSaida.disconnect();
+            if (rabbitChannel != null && rabbitChannel.isOpen())
+                rabbitChannel.close();
+            if (rabbitConnection != null && rabbitConnection.isOpen())
+                rabbitConnection.close();
             System.out.println("Gateway finalizado.");
         } catch (MqttException | IOException | TimeoutException e) {
             System.err.println("Erro ao encerrar o Gateway: " + e.getMessage());

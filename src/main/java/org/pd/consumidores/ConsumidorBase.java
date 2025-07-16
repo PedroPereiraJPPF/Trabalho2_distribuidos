@@ -3,7 +3,6 @@ package org.pd.consumidores;
 import com.rabbitmq.client.*;
 import org.pd.gateway.DadosClimaticos;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -47,7 +46,8 @@ public class ConsumidorBase {
             String message = new String(delivery.getBody(), "UTF-8");
             processarMensagem(message);
         };
-        channel.basicConsume(queueName, true, deliverCallback, consumerTag -> {});
+        channel.basicConsume(queueName, true, deliverCallback, consumerTag -> {
+        });
     }
 
     private void processarMensagem(String json) {
@@ -57,8 +57,7 @@ public class ConsumidorBase {
                         "\"umidade\":(\\d+\\.\\d+), " +
                         "\"pressao\":(\\d+\\.\\d+), " +
                         "\"radiacao\":(\\d+\\.\\d+), " +
-                        "\"timestamp\":(\\d+)"
-        );
+                        "\"timestamp\":(\\d+)");
 
         Matcher matcher = pattern.matcher(json);
 
@@ -88,42 +87,84 @@ public class ConsumidorBase {
     }
 
     private void exibirDashboard() {
-        System.out.println("\n\n--- DASHBOARD DE DADOS CLIMÁTICOS (Atualizado em " + new java.util.Date() + ") ---");
+        System.out.println("\n\n" + "=".repeat(80));
+        System.out.println("DASHBOARD DE DADOS CLIMATICOS (Atualizado em " + new java.util.Date() + ")");
+        System.out.println("=".repeat(80));
 
         List<DadosClimaticos> todosOsDados = dadosRecebidos.values().stream()
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
 
         if (todosOsDados.isEmpty()) {
-            System.out.println("Nenhum dado coletado ainda.");
+            System.out.println("AVISO: Nenhum dado coletado ainda. Aguardando dados dos drones...");
+            System.out.println("=".repeat(80) + "\n");
             return;
         }
 
         long total = todosOsDados.size();
         System.out.println("Total de dados coletados: " + total);
 
-        System.out.println("\n--- Distribuição de Dados por Elemento ---");
-        System.out.println("Temperatura: 25.00%");
-        System.out.println("Umidade: 25.00%");
-        System.out.println("Pressão: 25.00%");
-        System.out.println("Radiação: 25.00%");
+        System.out.println("\n\n--- DISTRIBUICAO DE DADOS POR REGIAO ---");
+        Map<String, Long> contagemPorRegiao = todosOsDados.stream()
+                .collect(Collectors.groupingBy(DadosClimaticos::getRegiao, Collectors.counting()));
 
-        System.out.println("\n--- Rankings por Média ---");
-        imprimirRanking("Temperatura", todosOsDados, DadosClimaticos::getTemperatura);
-        imprimirRanking("Umidade", todosOsDados, DadosClimaticos::getUmidade);
-        imprimirRanking("Pressão", todosOsDados, DadosClimaticos::getPressao);
-        imprimirRanking("Radiação", todosOsDados, DadosClimaticos::getRadiacao);
-        System.out.println("-----------------------------------------------------\n");
+        contagemPorRegiao.entrySet().stream()
+                .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
+                .forEach(entry -> {
+                    double percentual = (entry.getValue() * 100.0) / total;
+                    String emoji = getRegiaoEmoji(entry.getKey());
+                    System.out.printf("%s %s: %.2f%% (%d dados)\n",
+                            emoji,
+                            entry.getKey().substring(0, 1).toUpperCase() + entry.getKey().substring(1),
+                            percentual, entry.getValue());
+                });
+
+        System.out.println("\n--- ESTATISTICAS GERAIS ---");
+        System.out.printf("TEMPERATURA media geral: %.2f graus C\n",
+                todosOsDados.stream().mapToDouble(DadosClimaticos::getTemperatura).average().orElse(0.0));
+        System.out.printf("UMIDADE media geral: %.2f%%\n",
+                todosOsDados.stream().mapToDouble(DadosClimaticos::getUmidade).average().orElse(0.0));
+        System.out.printf("PRESSAO media geral: %.2f hPa\n",
+                todosOsDados.stream().mapToDouble(DadosClimaticos::getPressao).average().orElse(0.0));
+        System.out.printf("RADIACAO media geral: %.2f W/m2\n",
+                todosOsDados.stream().mapToDouble(DadosClimaticos::getRadiacao).average().orElse(0.0));
+
+        System.out.println("\n--- RANKINGS POR MEDIA ---");
+        imprimirRanking("TEMPERATURA", todosOsDados, DadosClimaticos::getTemperatura, "graus C");
+        imprimirRanking("UMIDADE", todosOsDados, DadosClimaticos::getUmidade, "%");
+        imprimirRanking("PRESSAO", todosOsDados, DadosClimaticos::getPressao, "hPa");
+        imprimirRanking("RADIACAO", todosOsDados, DadosClimaticos::getRadiacao, "W/m2");
+        System.out.println("=".repeat(80) + "\n");
     }
 
-    private void imprimirRanking(String nomeElemento, List<DadosClimaticos> dados, java.util.function.ToDoubleFunction<DadosClimaticos> extrator) {
+    private String getRegiaoEmoji(String regiao) {
+        switch (regiao.toLowerCase()) {
+            case "norte":
+                return "[NORTE]";
+            case "sul":
+                return "[SUL]";
+            case "leste":
+                return "[LESTE]";
+            case "oeste":
+                return "[OESTE]";
+            default:
+                return "[REGIAO]";
+        }
+    }
+
+    private void imprimirRanking(String nomeElemento, List<DadosClimaticos> dados,
+            java.util.function.ToDoubleFunction<DadosClimaticos> extrator, String unidade) {
         System.out.println(">> " + nomeElemento + " (Média do maior para o menor):");
         Map<String, Double> mediaPorRegiao = dados.stream()
                 .collect(Collectors.groupingBy(DadosClimaticos::getRegiao, Collectors.averagingDouble(extrator)));
 
         mediaPorRegiao.entrySet().stream()
                 .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
-                .forEach(entry -> System.out.printf("   - %s: %.2f\n", entry.getKey(), entry.getValue()));
+                .forEach(entry -> {
+                    String emoji = getRegiaoEmoji(entry.getKey());
+                    System.out.printf("   %s %s: %.2f %s\n",
+                            emoji, entry.getKey(), entry.getValue(), unidade);
+                });
     }
 
     public static void main(String[] args) throws Exception {
