@@ -15,31 +15,24 @@ public class Drone {
     private final Random random = new Random();
 
     private final String regiao;
-    private final String delimitador;
     private final String formato;
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
-    private boolean simulandoFalha = false;
-    private final ScheduledExecutorService falhaExecutor = Executors.newSingleThreadScheduledExecutor();
 
     public Drone(String regiao) {
         this.regiao = regiao;
 
         switch (regiao.toLowerCase()) {
             case "norte":
-                this.delimitador = "-";
                 this.formato = "%s-%s-%s-%s";
                 break;
             case "sul":
-                this.delimitador = "; ";
                 this.formato = "(%s; %s; %s; %s)";
                 break;
             case "leste":
-                this.delimitador = ", ";
                 this.formato = "{%s, %s, %s, %s}";
                 break;
             case "oeste":
-                this.delimitador = "#";
                 this.formato = "%s#%s#%s#%s";
                 break;
             default:
@@ -53,6 +46,24 @@ public class Drone {
             this.clienteMqtt = new MqttClient(broker, idCliente);
             MqttConnectOptions opcoesConexao = new MqttConnectOptions();
             opcoesConexao.setCleanSession(true);
+
+            opcoesConexao.setAutomaticReconnect(true);
+
+            this.clienteMqtt.setCallback(new MqttCallback() {
+                @Override
+                public void connectionLost(Throwable cause) {
+                    System.out.println(
+                            "🔴 Drone [" + regiao + "] - Conexão perdida! Tentando reconectar automaticamente...");
+                }
+
+                @Override
+                public void messageArrived(String topic, MqttMessage message) throws Exception {
+                }
+
+                @Override
+                public void deliveryComplete(IMqttDeliveryToken token) {
+                }
+            });
 
             System.out.println("Drone [" + regiao + "] conectando ao broker: " + broker);
             this.clienteMqtt.connect(opcoesConexao);
@@ -83,16 +94,8 @@ public class Drone {
             return;
         }
 
-        iniciarSimulacaoFalhas();
-
         Runnable envioTask = () -> {
             try {
-                if (simulandoFalha) {
-                    System.out.println(
-                            "⚠️  Drone [" + this.regiao + "] - Falha de comunicação simulada. Dados não enviados.");
-                    return;
-                }
-
                 String dados = gerarDadosClimaticos();
                 MqttMessage mensagem = new MqttMessage(dados.getBytes());
                 mensagem.setQos(0);
@@ -103,9 +106,6 @@ public class Drone {
 
             } catch (MqttException e) {
                 System.err.println("Erro ao publicar mensagem do Drone [" + regiao + "]: " + e.getMessage());
-                if (e.getReasonCode() == MqttException.REASON_CODE_CLIENT_NOT_CONNECTED) {
-                    executor.shutdown();
-                }
             }
         };
 
@@ -113,29 +113,9 @@ public class Drone {
         executor.scheduleAtFixedRate(envioTask, 0, intervalo, TimeUnit.MILLISECONDS);
     }
 
-    private void iniciarSimulacaoFalhas() {
-        Runnable falhaTask = () -> {
-            if (!simulandoFalha && random.nextDouble() < 0.3) {
-                simulandoFalha = true;
-                int duracaoFalha = 3000 + random.nextInt(7000);
-                System.out.println("🔴 Drone [" + regiao + "] - Iniciando simulação de falha por "
-                        + (duracaoFalha / 1000) + " segundos");
-
-                falhaExecutor.schedule(() -> {
-                    simulandoFalha = false;
-                    System.out.println("🟢 Drone [" + regiao + "] - Recuperado da falha de comunicação");
-                }, duracaoFalha, TimeUnit.MILLISECONDS);
-            }
-        };
-
-        int intervaloFalha = 15000 + random.nextInt(15000);
-        falhaExecutor.scheduleAtFixedRate(falhaTask, intervaloFalha, intervaloFalha, TimeUnit.MILLISECONDS);
-    }
-
     public void parar() throws MqttException {
         System.out.println("Finalizando drone [" + regiao + "]...");
         executor.shutdown();
-        falhaExecutor.shutdown();
         if (clienteMqtt.isConnected()) {
             clienteMqtt.disconnect();
         }
